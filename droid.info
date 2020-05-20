@@ -1,0 +1,4 @@
+Name: gmp-droid
+Description: gst-droid GMP plugin for Gecko
+Version: 0.1
+APIs: decode-video[h264:vp8:vp9]
