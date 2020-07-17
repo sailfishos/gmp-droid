@@ -12,6 +12,7 @@
 #include <cstring>
 #include <map>
 #include <stdlib.h>
+#include <arpa/inet.h>
 
 #include "droidmediacodec.h"
 
@@ -119,13 +120,13 @@ public:
     }
 
     if (aCodecSpecificSize && codecSettings.mCodecType == kGMPVideoCodecH264) {
-      m_metadata.codec_data.size = sizeof (GMPVideoCodecH264AVCC);
-      m_metadata.codec_data.data = malloc (m_metadata.codec_data.size);
+      // Copy AVCC data
+      m_metadata.codec_data.size = aCodecSpecificSize - 1;
+      m_metadata.codec_data.data = malloc (aCodecSpecificSize - 1);
       const GMPVideoCodecH264 *h264 =
           (const GMPVideoCodecH264 *) (aCodecSpecific);
-      memcpy (m_metadata.codec_data.data, &h264->mAVCC,
-          m_metadata.codec_data.size);
-      //TODO: this will probably need more processing
+      memcpy (m_metadata.codec_data.data, &h264->mAVCC, aCodecSpecificSize - 1);
+      LOG (DEBUG, "Got H264 codec data size: " << (aCodecSpecificSize - 1));
     } else {
       m_metadata.codec_data.size = 0;
     }
@@ -143,14 +144,70 @@ public:
       uint32_t aCodecSpecificInfoLength, int64_t renderTimeMs = -1) {
     LOG (DEBUG, "Decode: frame size=" << inputFrame->Size ()
         << " timestamp=" << inputFrame->TimeStamp ()
-        << " duration=" << inputFrame->Duration ());
+        << " duration=" << inputFrame->Duration ()
+        << " extra=" << aCodecSpecificInfoLength);
 
     DroidMediaBufferCallbacks cb;
     DroidMediaCodecData cdata;
 
+    if (!strcmp (m_metadata.parent.type, "video/avc")
+        && inputFrame->BufferType () != GMP_BufferSingle) {
+      // H264: Replace each NAL length with the start code
+      // The length is in network byte order, with size matching GMP_BufferLength
+      uint32_t offset = 0;
+      while (offset < inputFrame->Size ()) {
+        // Get NAL length
+        uint32_t len = 0;
+        uint8_t *len8 = 0;
+        uint32_t start_code_len = 0;
+
+        switch (inputFrame->BufferType ()) {
+          case GMP_BufferLength32:
+            len =
+                ntohl (*(reinterpret_cast <int32_t *>(inputFrame->Buffer () + offset)));
+            start_code_len = 4;
+            break;
+
+          case GMP_BufferLength16:
+            len =
+                ntohs (*(reinterpret_cast <int16_t *>(inputFrame->Buffer () + offset)));
+            start_code_len = 2;
+            break;
+
+          case GMP_BufferLength8:
+            len8 = (inputFrame->Buffer () + offset);
+            len = *len8;
+            start_code_len = 1;
+            break;
+
+          case GMP_BufferLength24:
+          case GMP_BufferInvalid:
+          default:
+            LOG (ERROR, "Unsupported H264 buffer size");
+            Error (GMPDecodeErr);
+            return;
+        }
+
+        // Check that we won't run out of space in the buffer
+        if (offset + len + 4 > inputFrame->Size ()) {
+          LOG (ERROR,
+              "Not enough space left for " << len << " bytes of NAL data");
+          Error (GMPDecodeErr);
+          return;
+        }
+        // Write NAL start code over the lenth
+        static const uint8_t code[] = { 0x00, 0x00, 0x00, 0x01 };
+        const uint8_t *start_code = code + (4 - start_code_len);
+        memcpy (inputFrame->Buffer () + offset, start_code, start_code_len);
+        offset += start_code_len + len;
+
+        LOG (DEBUG, "Parsed nal unit of size " << len);
+      }
+    }
+
     cdata.data.size = inputFrame->Size ();
-    cdata.data.data = malloc (cdata.data.size);
-    memcpy (cdata.data.data, inputFrame->Buffer (), cdata.data.size);
+    cdata.data.data = malloc (inputFrame->Size ());
+    memcpy (cdata.data.data, inputFrame->Buffer (), inputFrame->Size ());
 
     cb.data = cdata.data.data;
     cb.unref = free;
