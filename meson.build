@@ -15,7 +15,7 @@ hybris_dep = cc.find_library('hybris-common', required: true)
 
 gmpdroid_install_dir = '/'.join([ get_option('libdir'), 'xulrunner-qt5-'+get_option('gecko_ver'), meson.project_name(), meson.project_version()])
 
-source_c = [
+gmp_source = [
   'gmp-droid.cpp',
   'gmp-droid-conv.cpp',
   '/usr/share/droidmedia/hybris.c',
@@ -24,11 +24,20 @@ source_c = [
 ]
 
 gmpdroid_lib = shared_library('droid',
-                       source_c,
+                       gmp_source,
                        include_directories: [ gmp_api, droidmedia_h ],
                        install: true,
                        dependencies: hybris_dep,
                        install_dir: gmpdroid_install_dir )
 
-install_data('droid.info', install_dir: gmpdroid_install_dir)
+info_source = [
+  'generate-info.cpp',
+  '/usr/share/droidmedia/hybris.c'
+]
 
+generate_info = executable('generate-info',
+                       info_source,
+                       include_directories: [ droidmedia_h ],
+                       install: true,
+                       dependencies: hybris_dep,
+                       install_dir: gmpdroid_install_dir )
