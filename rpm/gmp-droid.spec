@@ -34,7 +34,7 @@ echo "%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/generate-info 1>%{_libdi
 
 %post
 # Query device codec support and write out the droid.info file. On imager this should postpone until first boot.
-%{_bindir}/add-oneshot --now gmp-generate-info.sh
+%{_bindir}/add-oneshot gmp-generate-info.sh
 
 %files
 %defattr(-,root,root,-)
