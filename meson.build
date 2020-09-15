@@ -13,7 +13,7 @@ gmp_api = include_directories('gmp-api')
 droidmedia_h = include_directories('/usr/include/droidmedia')
 hybris_dep = cc.find_library('hybris-common', required: true)
 
-gmpdroid_install_dir = '/'.join([ get_option('libdir'), 'xulrunner-qt5-'+get_option('gecko_ver'), meson.project_name(), meson.project_version()])
+gmpdroid_install_dir = '/'.join([ get_option('libdir'), meson.project_name(), meson.project_version()])
 
 gmp_source = [
   'gmp-droid.cpp',

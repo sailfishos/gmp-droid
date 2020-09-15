@@ -1,5 +1,3 @@
-%define gecko_ver 52.9.1
-
 Name:           gmp-droid
 Summary:        Gecko Media Plugin for droidmedia codec support
 Version:        0.1
@@ -23,14 +21,16 @@ Gecko Media Plugin for droidmedia codec support in Gecko based browsers
 %setup -q
 
 %build
-%meson -Dgecko_ver=%{gecko_ver}
+%meson
 
 %install
 %meson_install
 
 # create config oneshot
 install -D -m 0755 %{SOURCE1} %{buildroot}/%{_oneshotdir}/gmp-generate-info.sh
-echo "%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/generate-info 1>%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/droid.info 2>/dev/null" >> $RPM_BUILD_ROOT%{_oneshotdir}/gmp-generate-info.sh
+echo "%{_libdir}/%{name}/0.1/generate-info 1>%{_libdir}/%{name}/0.1/droid.info 2>/dev/null" > $RPM_BUILD_ROOT%{_oneshotdir}/gmp-generate-info.sh
+mkdir -p $RPM_BUILD_ROOT/%{_sharedstatedir}/environment/nemo/
+echo "MOZ_GMP_PATH=\"%{_libdir}/%{name}/0.1/\"" > $RPM_BUILD_ROOT/%{_sharedstatedir}/environment/nemo/70-browser-gmp.conf
 
 %post
 # Query device codec support and write out the droid.info file. On imager this should postpone until first boot.
@@ -39,9 +39,10 @@ echo "%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/generate-info 1>%{_libdi
 %files
 %defattr(-,root,root,-)
 %license LICENSE
-%dir %{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}
-%dir %{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1
-%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/libdroid.so
-%ghost %{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/droid.info
-%{_libdir}/xulrunner-qt5-%{gecko_ver}/%{name}/0.1/generate-info
+%dir %{_libdir}/%{name}
+%dir %{_libdir}/%{name}/0.1
+%{_libdir}/%{name}/0.1/libdroid.so
+%ghost %{_libdir}/%{name}/0.1/droid.info
+%{_libdir}/%{name}/0.1/generate-info
 %{_oneshotdir}/gmp-generate-info.sh
+%{_sharedstatedir}/environment/nemo/70-browser-gmp.conf
