@@ -7,6 +7,7 @@ URL:            https://github.com/sailfishos/%{name}
 Source0:        %{name}-%{version}.tar.gz
 Source1:        gmp-generate-info.sh
 BuildRequires:  meson
+BuildRequires:  ninja
 BuildRequires:  oneshot
 BuildRequires:  pkgconfig(libandroid-properties)
 BuildRequires:  droidmedia-devel
@@ -22,6 +23,7 @@ Gecko Media Plugin for droidmedia codec support in Gecko based browsers
 
 %build
 %meson
+%meson_build
 
 %install
 %meson_install
