@@ -188,20 +188,25 @@ public:
             return;
         }
 
-        // Check that we won't run out of space in the buffer
-        if (offset + len + 4 > inputFrame->Size ()) {
-          LOG (ERROR,
-              "Not enough space left for " << len << " bytes of NAL data");
-          Error (GMPDecodeErr);
-          return;
-        }
-        // Write NAL start code over the lenth
-        static const uint8_t code[] = { 0x00, 0x00, 0x00, 0x01 };
-        const uint8_t *start_code = code + (4 - start_code_len);
-        memcpy (inputFrame->Buffer () + offset, start_code, start_code_len);
-        offset += start_code_len + len;
 
-        LOG (DEBUG, "Parsed nal unit of size " << len);
+        if (len == 1) {
+          // Start code already processed
+          LOG (DEBUG, "NAL start code found. Skipping");
+          break;
+        } else if (offset + len + 4 > inputFrame->Size ()) {
+          // Make sure that we won't run out of space in the buffer
+          LOG (DEBUG,
+              "NAL length more than buffer size: " << len << " bytes");
+          break;
+        } else {
+            // Write NAL start code over the length
+          static const uint8_t code[] = { 0x00, 0x00, 0x00, 0x01 };
+          const uint8_t *start_code = code + (4 - start_code_len);
+          memcpy (inputFrame->Buffer () + offset, start_code, start_code_len);
+          offset += start_code_len + len;
+
+          LOG (DEBUG, "Parsed nal unit of size " << len);
+        }
       }
     }
 
@@ -214,7 +219,7 @@ public:
 
     cdata.ts = inputFrame->TimeStamp ();
     // Android doesn't pass duration through the codec - we'll have to keep it
-    m_dur.emplace (cdata.ts, inputFrame->Duration ());
+    m_dur[cdata.ts] = inputFrame->Duration ();
     cdata.sync = inputFrame->FrameType () == kGMPKeyFrame;
 
     inputFrame->Destroy ();
@@ -261,10 +266,12 @@ public:
       droid_media_codec_drain (m_codec);
     }
 
-    m_draining = true;
-    //TODO: This never happens because the codec never really drains
-    if (!m_codec || m_dur.size () == 0)
+    //TODO: This never happens because the codec never really drains, except for EOS
+    if (!m_codec || m_dur.size () == 0) {
       m_callback->DrainComplete ();
+    } else {
+        m_draining = true;
+    }
   }
 
   virtual void DecodingComplete ()
@@ -301,7 +308,6 @@ public:
 
     // Reset state
     m_draining = false;
-    m_dur.clear ();
 
     if (!droid_media_codec_start (m_codec)) {
       droid_media_codec_destroy (m_codec);
@@ -398,6 +404,11 @@ public:
       m_dropConverter = false;
     }
 
+    if (m_resetting) {
+        LOG(INFO, "Discarding decoded frame received while resetting");
+        return;
+    }
+
     if (!m_conv) {
       ConfigureOutput (data);
     }
@@ -426,12 +437,12 @@ public:
       return;
     }
     // Set timestamp
-    uint64_t ts = data->ts / 1000;
+    int64_t ts = data->ts / 1000;
     frame->SetTimestamp (ts);
 
     // Look up duration in our cache
     uint64_t dur = 0;
-    std::map <uint64_t, uint64_t>::iterator durIt = m_dur.find (ts);
+    std::map <int64_t, uint64_t>::iterator durIt = m_dur.find (ts);
     if (durIt != m_dur.end ()) {
       dur = durIt->second;
       m_dur.erase (durIt);
@@ -441,11 +452,11 @@ public:
     // Send the new frame back to Gecko
     m_callback->Decoded (frame);
     LOG (DEBUG, "ProcessFrame: Returning frame ts: " << ts << " dur: " << dur);
-    if (!m_draining)
-      m_callback->InputDataExhausted ();
-    LOG (DEBUG, "Buffers still out " << m_dur.size ());
-    if (m_draining && m_dur.size () == 0) {     // TODO: we never get the buffers down to 0
-      m_callback->DrainComplete ();
+    if (m_dur.size () == 0 && m_draining) {
+        // TODO: we never get the buffers down to 0 with the current SimpleDecodingSource, but EOS will do it
+        m_callback->DrainComplete ();
+    } else {
+      LOG (DEBUG, "Buffers still out " << m_dur.size ());
     }
   }
 
@@ -456,6 +467,7 @@ public:
       g_platform_api->runonmainthread (WrapTask (m_callback,
               &GMPVideoDecoderCallback::DrainComplete));
     }
+    m_dur.clear ();
   }
 
   void Error (GMPErr error)
@@ -481,7 +493,7 @@ private:
   bool m_dropConverter = false;
   bool m_draining = false;
   bool m_resetting = false;
-  std::map <uint64_t, uint64_t> m_dur;
+  std::map <int64_t, uint64_t> m_dur;
 };
 
 /*
