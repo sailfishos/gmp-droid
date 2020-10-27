@@ -30,9 +30,9 @@ Gecko Media Plugin for droidmedia codec support in Gecko based browsers
 
 # create config oneshot
 install -D -m 0755 %{SOURCE1} %{buildroot}/%{_oneshotdir}/gmp-generate-info.sh
-echo "%{_libdir}/%{name}/0.1/generate-info 1>%{_libdir}/%{name}/0.1/droid.info 2>/dev/null" > $RPM_BUILD_ROOT%{_oneshotdir}/gmp-generate-info.sh
+echo "%{_libdir}/%{name}/0.1/generate-info 1>%{_libdir}/%{name}/0.1/droid.info 2>/dev/null" >> %{buildroot}/%{_oneshotdir}/gmp-generate-info.sh
 mkdir -p $RPM_BUILD_ROOT/%{_sharedstatedir}/environment/nemo/
-echo "MOZ_GMP_PATH=\"%{_libdir}/%{name}/0.1/\"" > $RPM_BUILD_ROOT/%{_sharedstatedir}/environment/nemo/70-browser-gmp.conf
+echo "MOZ_GMP_PATH=\"%{_libdir}/%{name}/0.1/\"" > %{buildroot}/%{_sharedstatedir}/environment/nemo/70-browser-gmp.conf
 
 %post
 # Query device codec support and write out the droid.info file. On imager this should postpone until first boot.
