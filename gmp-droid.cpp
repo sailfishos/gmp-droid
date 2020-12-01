@@ -255,9 +255,18 @@ public:
 
   virtual void Reset ()
   {
-    ResetCodec ();
-    m_callback->ResetComplete ();
+    m_stop_lock->Acquire ();
+    if (m_resetting) {
+        m_stop_lock->Release ();
+        return;
+    }
+    m_resetting = true;
+    m_stop_lock->Release ();
 
+    if (m_codec) {
+      ResetCodec ();
+    }
+    m_callback->ResetComplete ();
   }
 
   virtual void Drain ()
@@ -276,6 +285,8 @@ public:
 
   virtual void DecodingComplete ()
   {
+    m_callback = nullptr;
+    m_host = nullptr;
     ResetCodec ();
   }
 
@@ -329,7 +340,7 @@ public:
     memset (&md, 0x0, sizeof (md));
     memset (&rect, 0x0, sizeof (rect));
     droid_media_codec_get_output_info (m_codec, &md, &rect);
-    LOG (DEBUG,
+    LOG (INFO,
         "ConfigureOutput: Configuring converter for stride:" << md.width
         << " slice-height: " << md.height << " top: " << rect.top
         << " left:" << rect.left << " width: " << rect.right - rect.left
@@ -347,9 +358,6 @@ public:
 
   void ResetCodec ()
   {
-    m_stop_lock->Acquire ();
-    m_resetting = true;
-    m_stop_lock->Release ();
     if (m_codec) {
       LOG (DEBUG, "Codec draining");
       droid_media_codec_drain (m_codec);
@@ -404,7 +412,7 @@ public:
       m_dropConverter = false;
     }
 
-    if (m_resetting) {
+    if (m_resetting || !m_callback || !m_host) {
         LOG(INFO, "Discarding decoded frame received while resetting");
         return;
     }
@@ -511,7 +519,7 @@ static int
 SizeChanged (void *data, int32_t width, int32_t height)
 {
   DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (DEBUG, "Received size changed");
+  LOG (INFO, "Received size changed " << width << " x " << height);
   decoder->RequestNewConverter ();
   return 0;
 }
