@@ -154,7 +154,7 @@ public:
   void SetFormat (DroidMediaRect * rect, int32_t width, int32_t height)
   {
     this->DroidColourConvert::SetFormat (rect, width, height);
-    m_stride = ALIGN_SIZE (width, 4);
+    m_slice_height = ALIGN_SIZE (m_slice_height, 4);
   }
 };
 
@@ -229,7 +229,6 @@ DroidColourConvert::GetConverter (DroidMediaCodecMetaData * md,
     }
   }
 
-  //TODO: DONT_USE_CODEC_SPECIFIED_HEIGHT/WIDTH quirks (if a device needs this)
   converter->SetFormat (rect, md->width, md->height);
   return converter;
 }
