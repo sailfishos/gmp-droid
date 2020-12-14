@@ -2,7 +2,7 @@ Name:           gmp-droid
 Summary:        Gecko Media Plugin for droidmedia codec support
 Version:        0.1
 Release:        1
-License:        MPL2.0
+License:        MPLv2.0
 URL:            https://github.com/sailfishos/%{name}
 Source0:        %{name}-%{version}.tar.gz
 Source1:        gmp-generate-info.sh
