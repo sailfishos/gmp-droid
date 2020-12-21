@@ -66,6 +66,9 @@ public:
     err = g_platform_api->createmutex (&m_stop_lock);
     if (GMP_FAILED (err))
         Error (err);
+    err = g_platform_api->createmutex (&m_drain_lock);
+    if (GMP_FAILED (err))
+        Error (err);
   }
 
   virtual ~DroidVideoDecoder ()
@@ -73,6 +76,7 @@ public:
     // Destroy the Mutex
     m_codec_lock->Destroy ();
     m_stop_lock->Destroy ();
+    m_drain_lock->Destroy ();
   }
 
 // GMPVideoDecoder methods
@@ -240,25 +244,32 @@ public:
   void SubmitBufferThread (DroidMediaCodecData cdata,
       DroidMediaBufferCallbacks cb)
   {
-
+    m_drain_lock->Acquire ();
     if (m_draining || (!m_codec && !CreateCodec ())) {
+      LOG (ERROR, "Buffer submitted while draining");
       cb.unref (cb.data);
+      m_drain_lock->Release ();
       return;
     }
+    m_drain_lock->Release ();
+
+    // This blocks when the input Source is full
     droid_media_codec_queue (m_codec, &cdata, &cb);
 
+    m_drain_lock->Acquire ();
     if (!m_draining && m_callback && g_platform_api) {
       g_platform_api->runonmainthread (WrapTask (m_callback,
               &GMPVideoDecoderCallback::InputDataExhausted));
     }
+    m_drain_lock->Release ();
   }
 
   virtual void Reset ()
   {
     m_stop_lock->Acquire ();
     if (m_resetting) {
-        m_stop_lock->Release ();
-        return;
+      m_stop_lock->Release ();
+      return;
     }
     m_resetting = true;
     m_stop_lock->Release ();
@@ -266,6 +277,10 @@ public:
     if (m_codec) {
       ResetCodec ();
     }
+    m_drain_lock->Acquire ();
+    m_draining = false;
+    m_drain_lock->Release ();
+    m_resetting = false;
     m_callback->ResetComplete ();
   }
 
@@ -276,11 +291,14 @@ public:
     }
 
     //TODO: This never happens because the codec never really drains, except for EOS
+    m_drain_lock->Acquire ();
     if (!m_codec || m_dur.size () == 0) {
       m_callback->DrainComplete ();
+      m_draining = false;
     } else {
-        m_draining = true;
+      m_draining = true;
     }
+    m_drain_lock->Release ();
   }
 
   virtual void DecodingComplete ()
@@ -316,9 +334,10 @@ public:
       cb.data_available = DataAvailable;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
-
     // Reset state
+    m_drain_lock->Acquire ();
     m_draining = false;
+    m_drain_lock->Release ();
 
     if (!droid_media_codec_start (m_codec)) {
       droid_media_codec_destroy (m_codec);
@@ -382,7 +401,6 @@ public:
     m_dur.clear ();
     RequestNewConverter ();
     m_codec_lock->Release ();
-    m_resetting = false;
   }
 
   void ProcessFrameLock (DroidMediaCodecData * decoded)
@@ -460,12 +478,15 @@ public:
     // Send the new frame back to Gecko
     m_callback->Decoded (frame);
     LOG (DEBUG, "ProcessFrame: Returning frame ts: " << ts << " dur: " << dur);
+    m_drain_lock->Acquire ();
     if (m_dur.size () == 0 && m_draining) {
-        // TODO: we never get the buffers down to 0 with the current SimpleDecodingSource, but EOS will do it
-        m_callback->DrainComplete ();
+      // TODO: we never get the buffers down to 0 with the current SimpleDecodingSource, but EOS will do it
+      m_callback->DrainComplete ();
+      m_draining = false;
     } else {
       LOG (DEBUG, "Buffers still out " << m_dur.size ());
     }
+    m_drain_lock->Release ();
   }
 
   virtual void EOS ()
@@ -494,6 +515,8 @@ private:
   // Stop lock prevents a deadlock when droid_media_codec_loop can't quit during
   // shutdown because it's waiting to get a frame processed on the main thread.
   GMPMutex *m_stop_lock = nullptr;
+  // Drain lock protects the m_draining flag
+  GMPMutex *m_drain_lock = nullptr;
   GMPThread *m_submit_thread = nullptr;
   DroidMediaCodecDecoderMetaData m_metadata;
   DroidMediaCodec *m_codec = nullptr;
@@ -558,8 +581,7 @@ GMPErr GMPInit (GMPPlatformAPI * platformAPI)
 GMPErr GMPGetAPI (const char *apiName, void *hostAPI, void **pluginApi)
 {
   if (!strcmp (apiName, "decode-video")) {
-    *pluginApi =
-	new DroidVideoDecoder (static_cast <GMPVideoHost *>(hostAPI));
+    *pluginApi = new DroidVideoDecoder (static_cast <GMPVideoHost *>(hostAPI));
     return GMPNoErr;
   }
   return GMPGenericErr;
