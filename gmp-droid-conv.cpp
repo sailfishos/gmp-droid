@@ -32,7 +32,7 @@ public:
   GMPErr Convert (GMPVideoHost * host, DroidMediaData * in,
       GMPVideoi420Frame * out)
   {
-    int32_t size = m_width * m_height;
+    int32_t size = m_stride * m_slice_height;
     uint8_t *buf = (uint8_t *) malloc (size * 3 / 2);
     droid_media_convert_to_i420 (m_convert, in, buf);
     out->CreateFrame (size, buf,
