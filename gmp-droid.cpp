@@ -47,12 +47,6 @@ static int g_log_level = INFO;
 
 static GMPPlatformAPI *g_platform_api = nullptr;
 
-// Droidmedia callbacks
-static void DroidError (void *data, int err);   // pass error and abord
-static int SizeChanged (void *data, int32_t width, int32_t height);     // reconfigure
-static void DataAvailable (void *data, DroidMediaCodecData * decoded);
-static void SignalEOS (void *data);
-
 class DroidVideoDecoder : public GMPVideoDecoder
 {
 public:
@@ -323,15 +317,15 @@ public:
 
     {
       DroidMediaCodecCallbacks cb;
-      cb.error = DroidError;
-      cb.size_changed = SizeChanged;
-      cb.signal_eos = SignalEOS;
+      cb.error = DroidVideoDecoder::DroidError;
+      cb.size_changed = DroidVideoDecoder::SizeChanged;
+      cb.signal_eos = DroidVideoDecoder::SignalEOS;
       droid_media_codec_set_callbacks (m_codec, &cb, this);
     }
 
     {
       DroidMediaCodecDataCallbacks cb;
-      cb.data_available = DataAvailable;
+      cb.data_available = DroidVideoDecoder::DataAvailable;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
     // Reset state
@@ -508,6 +502,43 @@ public:
   }
 
 private:
+  /*
+   * Droidmedia callbacks
+   */
+  static void
+  DataAvailable (void *data, DroidMediaCodecData * decoded)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    LOG (DEBUG, "Received decoded frame");
+    decoder->ProcessFrameLock (decoded);
+  }
+
+  static int
+  SizeChanged (void *data, int32_t width, int32_t height)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    LOG (INFO, "Received size changed " << width << " x " << height);
+    decoder->RequestNewConverter ();
+    return 0;
+  }
+
+  static void
+  DroidError (void *data, int err)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    LOG (ERROR, "Droidmedia error");
+    if (g_platform_api)
+      g_platform_api->runonmainthread (WrapTask (decoder,
+              &DroidVideoDecoder::Error, GMPDecodeErr));
+  }
+
+  static void
+  SignalEOS (void *data)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    decoder->EOS ();
+  }
+
   GMPVideoHost *m_host;
   GMPVideoDecoderCallback *m_callback = nullptr;
   // Codec lock makes sure that the codec isn't recreated while it's being destroyed
@@ -526,43 +557,6 @@ private:
   bool m_resetting = false;
   std::map <int64_t, uint64_t> m_dur;
 };
-
-/*
- * Droidmedia callbacks
- */
-static void
-DataAvailable (void *data, DroidMediaCodecData * decoded)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (DEBUG, "Received decoded frame");
-  decoder->ProcessFrameLock (decoded);
-}
-
-static int
-SizeChanged (void *data, int32_t width, int32_t height)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (INFO, "Received size changed " << width << " x " << height);
-  decoder->RequestNewConverter ();
-  return 0;
-}
-
-static void
-DroidError (void *data, int err)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (ERROR, "Droidmedia error");
-  if (g_platform_api)
-    g_platform_api->runonmainthread (WrapTask (decoder,
-            &DroidVideoDecoder::Error, GMPDecodeErr));
-}
-
-static void
-SignalEOS (void *data)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  decoder->EOS ();
-}
 
 /*
  * GMP Initialization functions
