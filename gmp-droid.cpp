@@ -299,6 +299,7 @@ public:
   {
     m_callback = nullptr;
     m_host = nullptr;
+    m_resetting = true;
     ResetCodec ();
   }
 
@@ -400,12 +401,6 @@ public:
   void ProcessFrameLock (DroidMediaCodecData * decoded)
   {
     m_stop_lock->Acquire ();
-    if (m_resetting) {
-      LOG (ERROR, "Received decoded frame while resetting codec");
-      m_stop_lock->Release ();
-      return;
-    }
-
     if (g_platform_api) {
       g_platform_api->syncrunonmainthread (WrapTask (this,
               &DroidVideoDecoder::ProcessFrame, decoded));
@@ -510,7 +505,11 @@ private:
   {
     DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
     LOG (DEBUG, "Received decoded frame");
-    decoder->ProcessFrameLock (decoded);
+    if (!decoder->m_resetting) {
+      decoder->ProcessFrameLock (decoded);
+    } else {
+      LOG (ERROR, "Received decoded frame while resetting codec");
+    }
   }
 
   static int
