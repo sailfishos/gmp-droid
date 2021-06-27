@@ -248,6 +248,11 @@ public:
     }
     m_drain_lock->Release ();
 
+    if (m_resetting) {
+      LOG (INFO, "Buffer submitted while resetting");
+      return;
+    }
+
     // This blocks when the input Source is full
     droid_media_codec_queue (m_codec, &cdata, &cb);
 
@@ -266,17 +271,22 @@ public:
       m_stop_lock->Release ();
       return;
     }
-    m_resetting = true;
-    m_stop_lock->Release ();
 
-    if (m_codec) {
-      ResetCodec ();
+    m_resetting = true;
+
+    if (m_processing) {
+      // Reset() will be called from DataAvailable() later
+      LOG (INFO, "Reset while m_processing");
+      m_stop_lock->Release ();
+      return;
     }
-    m_drain_lock->Acquire ();
-    m_draining = false;
-    m_drain_lock->Release ();
-    m_resetting = false;
-    m_callback->ResetComplete ();
+
+    if (g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
+    m_stop_lock->Release ();
   }
 
   virtual void Drain ()
@@ -301,7 +311,12 @@ public:
     m_callback = nullptr;
     m_host = nullptr;
     m_resetting = true;
-    ResetCodec ();
+
+    if (g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
   }
 
   bool CreateCodec ()
@@ -399,19 +414,10 @@ public:
     m_codec_lock->Release ();
   }
 
-  void ProcessFrameLock (DroidMediaCodecData * decoded)
+  void ProcessFrame (DroidMediaCodecData * decoded)
   {
     m_stop_lock->Acquire ();
-    if (g_platform_api) {
-      g_platform_api->syncrunonmainthread (WrapTask (this,
-              &DroidVideoDecoder::ProcessFrame, decoded));
-    }
-    m_stop_lock->Release ();
-  }
 
-  // Return the decoded data back to the parent.
-  void ProcessFrame (DroidMediaCodecData * data)
-  {
     // Delete the current colour converter if requested
     if (m_dropConverter) {
       if (m_conv)
@@ -422,9 +428,32 @@ public:
 
     if (m_resetting || !m_callback || !m_host) {
         LOG(INFO, "Discarding decoded frame received while resetting");
+        m_stop_lock->Release ();
         return;
     }
 
+    m_processing = true;
+    m_stop_lock->Release ();
+
+    if (g_platform_api) {
+      g_platform_api->syncrunonmainthread (WrapTask (this,
+              &DroidVideoDecoder::ProcessFrame_m, decoded));
+    }
+
+    m_stop_lock->Acquire ();
+    m_processing = false;
+    if (m_resetting && g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
+    m_stop_lock->Release ();
+
+  }
+
+  // Return the decoded data back to the parent.
+  void ProcessFrame_m (DroidMediaCodecData * data)
+  {
     if (!m_conv) {
       ConfigureOutput (data);
     }
@@ -498,6 +527,22 @@ public:
   }
 
 private:
+
+  virtual void Reset_m ()
+  {
+    LOG (DEBUG, "Reset_m");
+    if (m_codec) {
+      ResetCodec ();
+    }
+    m_drain_lock->Acquire ();
+    m_draining = false;
+    m_drain_lock->Release ();
+    m_resetting = false;
+    if (m_callback) {
+      m_callback->ResetComplete ();
+    }
+  }
+
   /*
    * Droidmedia callbacks
    */
@@ -505,12 +550,7 @@ private:
   DataAvailable (void *data, DroidMediaCodecData * decoded)
   {
     DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-    LOG (DEBUG, "Received decoded frame");
-    if (!decoder->m_resetting) {
-      decoder->ProcessFrameLock (decoded);
-    } else {
-      LOG (ERROR, "Received decoded frame while resetting codec");
-    }
+    decoder->ProcessFrame (decoded);
   }
 
   static int
@@ -555,6 +595,7 @@ private:
   bool m_dropConverter = false;
   bool m_draining = false;
   bool m_resetting = false;
+  bool m_processing = false;
   std::map <int64_t, uint64_t> m_dur;
 };
 
@@ -564,6 +605,14 @@ public:
   explicit DroidVideoEncoder (GMPVideoHost * hostAPI)
       : m_host (hostAPI)
   {
+    GMPErr err = g_platform_api->createmutex (&m_stop_lock);
+    if (GMP_FAILED (err))
+        Error (err);
+  }
+
+  virtual ~DroidVideoEncoder ()
+  {
+    m_stop_lock->Destroy ();
   }
 
   void InitEncode (const GMPVideoCodec& codecSettings,
@@ -633,7 +682,8 @@ public:
         "InitEncode: Codec metadata prepared: " << m_metadata.parent.type
         << " width=" << m_metadata.parent.width
         << " height=" << m_metadata.parent.height
-        << " fps=" << m_metadata.parent.fps);
+        << " fps=" << m_metadata.parent.fps
+        << " bitrate=" << m_metadata.bitrate);
   }
 
   void Encode (GMPVideoi420Frame* inputFrame,
@@ -707,10 +757,22 @@ public:
 
   void EncodingComplete ()
   {
-      LOG (INFO, "EncodingComplete");
-      droid_media_codec_stop(m_codec);
-      droid_media_codec_destroy(m_codec);
-      m_codec = nullptr;
+    // Do not try to stop the codec if it is hanging in data_available()
+    m_stop_lock->Acquire();
+    m_stopping = true;
+    if (m_processing) {
+      // EncodingComplete() will be called from DataAvailable() later
+      m_stop_lock->Release();
+      return;
+    }
+    m_stop_lock->Release();
+
+    LOG (INFO, "EncodingComplete");
+    droid_media_codec_stop(m_codec);
+    droid_media_codec_destroy(m_codec);
+    LOG (INFO, "EncodingComplete: Codec destroyed");
+    m_stopping = false;
+    m_codec = nullptr;
   }
 
   void Error (GMPErr error)
@@ -727,6 +789,9 @@ private:
   DroidMediaCodecEncoderMetaData m_metadata;
   DroidMediaCodec *m_codec = nullptr;
   GMPVideoCodecType m_codecType = kGMPVideoCodecInvalid;
+  GMPMutex *m_stop_lock = nullptr;
+  bool m_processing = false;
+  bool m_stopping = false;
 
   bool CreateEncoder ()
   {
@@ -749,7 +814,7 @@ private:
 
     {
       DroidMediaCodecDataCallbacks cb;
-      cb.data_available = DroidVideoEncoder::DataAvailable;
+      cb.data_available = DroidVideoEncoder::DataAvailableCallback;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
 
@@ -767,13 +832,38 @@ private:
     return true;
   }
 
-  static void DataAvailable (void *data, DroidMediaCodecData* encoded)
+  // Called on a codec thread
+  static void DataAvailableCallback (void *data, DroidMediaCodecData* encoded)
   {
     DroidVideoEncoder *encoder = (DroidVideoEncoder*) data;
+    encoder->DataAvailable (data, encoded);
+  }
+
+  // Called on a codec thread
+  void DataAvailable (void *data, DroidMediaCodecData* encoded)
+  {
+    m_stop_lock->Acquire();
+    if (m_stopping) {
+      LOG (ERROR, "DataAvailable() while m_stopping is set");
+      m_stop_lock->Release();
+      return;
+    }
+
+    m_processing = true;
+    m_stop_lock->Release();
 
     if (g_platform_api)
-      g_platform_api->syncrunonmainthread (WrapTask (encoder,
+      g_platform_api->syncrunonmainthread (WrapTask (this,
             &DroidVideoEncoder::FrameAvailable, encoded));
+
+    m_stop_lock->Acquire();
+    m_processing = false;
+    if (m_stopping && g_platform_api) {
+      // EncodingComplete() was called. Execute it on main thread.
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoEncoder::EncodingComplete));
+    }
+    m_stop_lock->Release();
   }
 
   void FrameAvailable (DroidMediaCodecData* encoded)
