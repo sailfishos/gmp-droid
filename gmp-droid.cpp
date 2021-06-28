@@ -1,6 +1,6 @@
 /****************************************************************************
 **
-** Copyright (c) 2020 Open Mobile Platform LLC.
+** Copyright (c) 2020-2021 Open Mobile Platform LLC.
 **
 ** This Source Code Form is subject to the terms of the
 ** Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed
@@ -20,6 +20,7 @@
 #include "gmp-video-host.h"
 
 #include "gmp-video-decode.h"
+#include "gmp-video-encode.h"
 #include "gmp-video-frame-i420.h"
 #include "gmp-video-frame-encoded.h"
 #include "gmp-droid-conv.h"
@@ -46,12 +47,6 @@ static int g_log_level = INFO;
     } while(0)
 
 static GMPPlatformAPI *g_platform_api = nullptr;
-
-// Droidmedia callbacks
-static void DroidError (void *data, int err);   // pass error and abord
-static int SizeChanged (void *data, int32_t width, int32_t height);     // reconfigure
-static void DataAvailable (void *data, DroidMediaCodecData * decoded);
-static void SignalEOS (void *data);
 
 class DroidVideoDecoder : public GMPVideoDecoder
 {
@@ -253,6 +248,11 @@ public:
     }
     m_drain_lock->Release ();
 
+    if (m_resetting) {
+      LOG (INFO, "Buffer submitted while resetting");
+      return;
+    }
+
     // This blocks when the input Source is full
     droid_media_codec_queue (m_codec, &cdata, &cb);
 
@@ -271,17 +271,22 @@ public:
       m_stop_lock->Release ();
       return;
     }
-    m_resetting = true;
-    m_stop_lock->Release ();
 
-    if (m_codec) {
-      ResetCodec ();
+    m_resetting = true;
+
+    if (m_processing) {
+      // Reset() will be called from DataAvailable() later
+      LOG (INFO, "Reset while m_processing");
+      m_stop_lock->Release ();
+      return;
     }
-    m_drain_lock->Acquire ();
-    m_draining = false;
-    m_drain_lock->Release ();
-    m_resetting = false;
-    m_callback->ResetComplete ();
+
+    if (g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
+    m_stop_lock->Release ();
   }
 
   virtual void Drain ()
@@ -305,7 +310,13 @@ public:
   {
     m_callback = nullptr;
     m_host = nullptr;
-    ResetCodec ();
+    m_resetting = true;
+
+    if (g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
   }
 
   bool CreateCodec ()
@@ -323,15 +334,15 @@ public:
 
     {
       DroidMediaCodecCallbacks cb;
-      cb.error = DroidError;
-      cb.size_changed = SizeChanged;
-      cb.signal_eos = SignalEOS;
+      cb.error = DroidVideoDecoder::DroidError;
+      cb.size_changed = DroidVideoDecoder::SizeChanged;
+      cb.signal_eos = DroidVideoDecoder::SignalEOS;
       droid_media_codec_set_callbacks (m_codec, &cb, this);
     }
 
     {
       DroidMediaCodecDataCallbacks cb;
-      cb.data_available = DataAvailable;
+      cb.data_available = DroidVideoDecoder::DataAvailable;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
     // Reset state
@@ -403,25 +414,10 @@ public:
     m_codec_lock->Release ();
   }
 
-  void ProcessFrameLock (DroidMediaCodecData * decoded)
+  void ProcessFrame (DroidMediaCodecData * decoded)
   {
     m_stop_lock->Acquire ();
-    if (m_resetting) {
-      LOG (ERROR, "Received decoded frame while resetting codec");
-      m_stop_lock->Release ();
-      return;
-    }
 
-    if (g_platform_api) {
-      g_platform_api->syncrunonmainthread (WrapTask (this,
-              &DroidVideoDecoder::ProcessFrame, decoded));
-    }
-    m_stop_lock->Release ();
-  }
-
-  // Return the decoded data back to the parent.
-  void ProcessFrame (DroidMediaCodecData * data)
-  {
     // Delete the current colour converter if requested
     if (m_dropConverter) {
       if (m_conv)
@@ -432,9 +428,32 @@ public:
 
     if (m_resetting || !m_callback || !m_host) {
         LOG(INFO, "Discarding decoded frame received while resetting");
+        m_stop_lock->Release ();
         return;
     }
 
+    m_processing = true;
+    m_stop_lock->Release ();
+
+    if (g_platform_api) {
+      g_platform_api->syncrunonmainthread (WrapTask (this,
+              &DroidVideoDecoder::ProcessFrame_m, decoded));
+    }
+
+    m_stop_lock->Acquire ();
+    m_processing = false;
+    if (m_resetting && g_platform_api) {
+      // Reset() was called. Execute it on main thread
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoDecoder::Reset_m));
+    }
+    m_stop_lock->Release ();
+
+  }
+
+  // Return the decoded data back to the parent.
+  void ProcessFrame_m (DroidMediaCodecData * data)
+  {
     if (!m_conv) {
       ConfigureOutput (data);
     }
@@ -508,6 +527,58 @@ public:
   }
 
 private:
+
+  virtual void Reset_m ()
+  {
+    LOG (DEBUG, "Reset_m");
+    if (m_codec) {
+      ResetCodec ();
+    }
+    m_drain_lock->Acquire ();
+    m_draining = false;
+    m_drain_lock->Release ();
+    m_resetting = false;
+    if (m_callback) {
+      m_callback->ResetComplete ();
+    }
+  }
+
+  /*
+   * Droidmedia callbacks
+   */
+  static void
+  DataAvailable (void *data, DroidMediaCodecData * decoded)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    decoder->ProcessFrame (decoded);
+  }
+
+  static int
+  SizeChanged (void *data, int32_t width, int32_t height)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    LOG (INFO, "Received size changed " << width << " x " << height);
+    decoder->RequestNewConverter ();
+    return 0;
+  }
+
+  static void
+  DroidError (void *data, int err)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    LOG (ERROR, "Droidmedia error");
+    if (g_platform_api)
+      g_platform_api->runonmainthread (WrapTask (decoder,
+              &DroidVideoDecoder::Error, GMPDecodeErr));
+  }
+
+  static void
+  SignalEOS (void *data)
+  {
+    DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
+    decoder->EOS ();
+  }
+
   GMPVideoHost *m_host;
   GMPVideoDecoderCallback *m_callback = nullptr;
   // Codec lock makes sure that the codec isn't recreated while it's being destroyed
@@ -524,45 +595,407 @@ private:
   bool m_dropConverter = false;
   bool m_draining = false;
   bool m_resetting = false;
+  bool m_processing = false;
   std::map <int64_t, uint64_t> m_dur;
 };
 
-/*
- * Droidmedia callbacks
- */
-static void
-DataAvailable (void *data, DroidMediaCodecData * decoded)
+class DroidVideoEncoder : public GMPVideoEncoder
 {
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (DEBUG, "Received decoded frame");
-  decoder->ProcessFrameLock (decoded);
-}
+public:
+  explicit DroidVideoEncoder (GMPVideoHost * hostAPI)
+      : m_host (hostAPI)
+  {
+    GMPErr err = g_platform_api->createmutex (&m_stop_lock);
+    if (GMP_FAILED (err))
+        Error (err);
+  }
 
-static int
-SizeChanged (void *data, int32_t width, int32_t height)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (INFO, "Received size changed " << width << " x " << height);
-  decoder->RequestNewConverter ();
-  return 0;
-}
+  virtual ~DroidVideoEncoder ()
+  {
+    m_stop_lock->Destroy ();
+  }
 
-static void
-DroidError (void *data, int err)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  LOG (ERROR, "Droidmedia error");
-  if (g_platform_api)
-    g_platform_api->runonmainthread (WrapTask (decoder,
-            &DroidVideoDecoder::Error, GMPDecodeErr));
-}
+  void InitEncode (const GMPVideoCodec& codecSettings,
+      const uint8_t* aCodecSpecific,
+      uint32_t aCodecSpecificSize,
+      GMPVideoEncoderCallback* callback,
+      int32_t aNumberOfCores,
+      uint32_t aMaxPayloadSize)
+  {
+    LOG (DEBUG, "Init encode aCodecSpecificSize:" << aCodecSpecificSize
+        << " aNumberOfCores:" << aNumberOfCores
+        << " aMaxPayloadSize:" << aMaxPayloadSize);
+    m_callback = callback;
 
-static void
-SignalEOS (void *data)
-{
-  DroidVideoDecoder *decoder = (DroidVideoDecoder *) data;
-  decoder->EOS ();
-}
+    // Check if this device supports the codec we want
+    memset (&m_metadata, 0x0, sizeof (m_metadata));
+    m_metadata.parent.flags =
+        static_cast <DroidMediaCodecFlags> (DROID_MEDIA_CODEC_HW_ONLY);
+
+    m_codecType = codecSettings.mCodecType;
+
+    switch (m_codecType) {
+      case kGMPVideoCodecVP8:
+        m_metadata.parent.type = "video/x-vnd.on2.vp8";
+        break;
+      case kGMPVideoCodecVP9:
+        m_metadata.parent.type = "video/x-vnd.on2.vp9";
+        break;
+      case kGMPVideoCodecH264:
+        m_metadata.parent.type = "video/avc";
+        // TODO: Some devices may not support this feature. A workaround is
+        // to save AVCC data and put it before every IDR manually.
+        m_metadata.codec_specific.h264.prepend_header_to_sync_frames = true;
+        break;
+      default:
+        LOG (ERROR, "Unknown GMP codec");
+        Error (GMPNotImplementedErr);
+        return;
+    }
+
+    // Check that the requested encoder is actually available on this device
+    if (!droid_media_codec_is_supported (&m_metadata.parent, true)) {
+      LOG (ERROR, "Codec not supported: " << m_metadata.parent.type);
+      Error (GMPNotImplementedErr);
+      return;
+    }
+    // Set codec parameters
+    m_metadata.parent.width = codecSettings.mWidth;
+    m_metadata.parent.height = codecSettings.mHeight;
+
+    if (codecSettings.mMaxFramerate) {
+      m_metadata.parent.fps = codecSettings.mMaxFramerate;
+    }
+
+    m_metadata.bitrate = codecSettings.mStartBitrate * 1024;
+    m_metadata.stride = codecSettings.mWidth;
+    m_metadata.slice_height = codecSettings.mHeight;
+    m_metadata.meta_data = false;
+
+    {
+      DroidMediaColourFormatConstants c;
+      droid_media_colour_format_constants_init(&c);
+      m_metadata.color_format = c.OMX_COLOR_FormatYUV420Planar;
+    }
+
+    LOG (INFO,
+        "InitEncode: Codec metadata prepared: " << m_metadata.parent.type
+        << " width=" << m_metadata.parent.width
+        << " height=" << m_metadata.parent.height
+        << " fps=" << m_metadata.parent.fps
+        << " bitrate=" << m_metadata.bitrate);
+  }
+
+  void Encode (GMPVideoi420Frame* inputFrame,
+      const uint8_t* codecSpecificInfo,
+      uint32_t codecSpecificInfoLength,
+      const GMPVideoFrameType* frameTypes,
+      uint32_t frameTypesLength)
+  {
+    LOG (DEBUG, "Encode:"
+        << " timestamp=" << inputFrame->Timestamp ()
+        << " duration=" << inputFrame->Duration ()
+        << " extra=" << codecSpecificInfoLength
+        << " frameTypesLength=" << frameTypesLength
+        << " frameType[0]=" << frameTypes[0]);
+
+    DroidMediaCodecData data;
+    DroidMediaBufferCallbacks cb;
+
+    if (!m_codec && !CreateEncoder ()) {
+      LOG (ERROR, "Cannot create encoder");
+      return;
+    }
+
+    // Copy the frame to contiguous memory buffer
+    const unsigned y_size = inputFrame->Width() * inputFrame->Height();
+    const unsigned u_size = y_size / 4;
+    const unsigned v_size = y_size / 4;
+    uint8_t *buf;
+
+    LOG (DEBUG, "plane sizes: " << y_size
+        << " " << u_size
+        << " " << v_size
+        << " timestamp: " << inputFrame->Timestamp()
+        << " sync: " << (frameTypes[0] == kGMPKeyFrame));
+
+    buf = (uint8_t *)malloc (y_size + u_size + v_size);
+    data.data.data = buf;
+    data.data.size = y_size + u_size + v_size;
+
+    memcpy(buf, inputFrame->Buffer(kGMPYPlane), y_size);
+    buf += y_size;
+    memcpy(buf, inputFrame->Buffer(kGMPUPlane), u_size);
+    buf += u_size;
+    memcpy(buf, inputFrame->Buffer(kGMPVPlane), v_size);
+
+    data.ts = inputFrame->Timestamp();
+    data.sync = frameTypes[0] == kGMPKeyFrame;
+
+    cb.unref = free;
+    cb.data = data.data.data;
+
+    droid_media_codec_queue (m_codec, &data, &cb);
+
+    inputFrame->Destroy();
+  }
+
+  void SetChannelParameters(uint32_t aPacketLoss, uint32_t aRTT)
+  {
+      LOG (INFO, "SetChannelParameters: packetLoss:" << aPacketLoss << " RTT:" << aRTT);
+  }
+
+  void SetRates(uint32_t aNewBitRate, uint32_t aFrameRate)
+  {
+      LOG (INFO, "SetRates: newBitrate=" << aNewBitRate << " frameRate=" << aFrameRate);
+  }
+
+  void SetPeriodicKeyFrames(bool aEnable)
+  {
+      LOG (INFO, "SetPeriodicKeyFrames: enable=" << aEnable);
+  }
+
+  void EncodingComplete ()
+  {
+    // Do not try to stop the codec if it is hanging in data_available()
+    m_stop_lock->Acquire();
+    m_stopping = true;
+    if (m_processing) {
+      // EncodingComplete() will be called from DataAvailable() later
+      m_stop_lock->Release();
+      return;
+    }
+    m_stop_lock->Release();
+
+    LOG (INFO, "EncodingComplete");
+    droid_media_codec_stop(m_codec);
+    droid_media_codec_destroy(m_codec);
+    LOG (INFO, "EncodingComplete: Codec destroyed");
+    m_stopping = false;
+    m_codec = nullptr;
+  }
+
+  void Error (GMPErr error)
+  {
+    if (m_callback && g_platform_api) {
+      g_platform_api->runonmainthread (WrapTask (m_callback,
+              &GMPVideoEncoderCallback::Error, error));
+    }
+  }
+
+private:
+  GMPVideoHost *m_host;
+  GMPVideoEncoderCallback *m_callback = nullptr;
+  DroidMediaCodecEncoderMetaData m_metadata;
+  DroidMediaCodec *m_codec = nullptr;
+  GMPVideoCodecType m_codecType = kGMPVideoCodecInvalid;
+  GMPMutex *m_stop_lock = nullptr;
+  bool m_processing = false;
+  bool m_stopping = false;
+
+  bool CreateEncoder ()
+  {
+    m_codec = droid_media_codec_create_encoder (&m_metadata);
+
+    if (!m_codec) {
+      LOG (ERROR, "Failed to create the encoder");
+      Error (GMPEncodeErr);
+      return false;
+    }
+
+    LOG (INFO, "Codec created for " << m_metadata.parent.type);
+
+    {
+      DroidMediaCodecCallbacks cb;
+      cb.error = DroidVideoEncoder::DroidError;
+      cb.signal_eos = DroidVideoEncoder::SignalEOS;
+      droid_media_codec_set_callbacks (m_codec, &cb, this);
+    }
+
+    {
+      DroidMediaCodecDataCallbacks cb;
+      cb.data_available = DroidVideoEncoder::DataAvailableCallback;
+      droid_media_codec_set_data_callbacks (m_codec, &cb, this);
+    }
+
+    LOG (DEBUG, "Starting the encoder..");
+    int result = droid_media_codec_start (m_codec);
+    if (result == 0) {
+      droid_media_codec_stop (m_codec);
+      droid_media_codec_destroy (m_codec);
+      m_codec = nullptr;
+      LOG (ERROR, "Failed to start the encoder!");
+      Error (GMPEncodeErr);
+      return false;
+    }
+    LOG (DEBUG, "Encoder started");
+    return true;
+  }
+
+  // Called on a codec thread
+  static void DataAvailableCallback (void *data, DroidMediaCodecData* encoded)
+  {
+    DroidVideoEncoder *encoder = (DroidVideoEncoder*) data;
+    encoder->DataAvailable (data, encoded);
+  }
+
+  // Called on a codec thread
+  void DataAvailable (void *data, DroidMediaCodecData* encoded)
+  {
+    m_stop_lock->Acquire();
+    if (m_stopping) {
+      LOG (ERROR, "DataAvailable() while m_stopping is set");
+      m_stop_lock->Release();
+      return;
+    }
+
+    m_processing = true;
+    m_stop_lock->Release();
+
+    if (g_platform_api)
+      g_platform_api->syncrunonmainthread (WrapTask (this,
+            &DroidVideoEncoder::FrameAvailable, encoded));
+
+    m_stop_lock->Acquire();
+    m_processing = false;
+    if (m_stopping && g_platform_api) {
+      // EncodingComplete() was called. Execute it on main thread.
+      g_platform_api->runonmainthread (WrapTask (this,
+              &DroidVideoEncoder::EncodingComplete));
+    }
+    m_stop_lock->Release();
+  }
+
+  void FrameAvailable (DroidMediaCodecData* encoded)
+  {
+    LOG (DEBUG, "Received encoded frame of length " << encoded->data.size
+        << " ts " << encoded->ts
+        << " sync " << encoded->sync
+        << " codec_config " << encoded->codec_config);
+
+    GMPVideoFrame* tmpFrame;
+    GMPErr err = m_host->CreateFrame (kGMPEncodedVideoFrame, &tmpFrame);
+    if (err != GMPNoErr) {
+      LOG (ERROR, "Cannot create frame");
+      return;
+    }
+
+    GMPVideoEncodedFrame* frame = static_cast<GMPVideoEncodedFrame*> (tmpFrame);
+    err = frame->CreateEmptyFrame (encoded->data.size);
+    if (err != GMPNoErr) {
+      LOG (ERROR, "Cannot allocate memory");
+      frame->Destroy();
+      return;
+    }
+
+    // Copy encoded data to the output frame
+    memcpy (frame->Buffer(), encoded->data.data, encoded->data.size);
+
+    GMPBufferType bufferType = GMP_BufferSingle;
+
+    frame->SetEncodedWidth (m_metadata.parent.width);
+    frame->SetEncodedHeight (m_metadata.parent.height);
+    frame->SetTimeStamp (encoded->ts / 1000); // Convert to usec
+    frame->SetCompleteFrame (true);
+    frame->SetFrameType (encoded->sync ? kGMPKeyFrame : kGMPDeltaFrame);
+
+    GMPCodecSpecificInfo info;
+    memset (&info, 0, sizeof (info));
+    info.mCodecType = m_codecType;
+
+    // Convert NAL Units. Gecko expects header in native byte order
+    if (m_codecType == kGMPVideoCodecH264) {
+      bufferType = GMP_BufferLength32; // FIXME: Can it change?
+      info.mCodecSpecific.mH264.mSimulcastIdx = 0;
+
+      ConvertNalUnits (frame->Buffer(), encoded->data.size, bufferType);
+    }
+
+    frame->SetBufferType (bufferType);
+    info.mBufferType = bufferType;
+
+    m_callback->Encoded (frame, reinterpret_cast<uint8_t*> (&info), sizeof (info));
+  }
+
+  static inline void UnalignedWrite32 (uint8_t *dest, uint32_t val)
+  {
+    dest[0] = val & 0xff;
+    dest[1] = (val >> 8) & 0xff;
+    dest[2] = (val >> 16) & 0xff;
+    dest[3] = (val >> 24) & 0xff;
+  }
+
+  static void ConvertNalUnits (uint8_t *buf, size_t bufSize, GMPBufferType bufferType)
+  {
+    const uint8_t nalStartCode[] = {0, 0, 0, 1};
+    uint8_t *p = buf, *end = buf + bufSize;
+    uint8_t *prevNalStart = NULL, *nalStart = NULL;
+    unsigned nalStartSize;
+
+    switch (bufferType) {
+      case GMP_BufferLength32:
+        nalStartSize = 4;
+        break;
+      case GMP_BufferLength24:
+        nalStartSize = 3;
+        break;
+      case GMP_BufferLength16:
+        nalStartSize = 2;
+        break;
+      case GMP_BufferLength8:
+        nalStartSize = 1;
+        break;
+      default:
+        return;
+    }
+
+    while (p < end) {
+      // NAL Unit start code found
+      if (0 == memcmp (p, nalStartCode + (4 - nalStartSize), nalStartSize)) {
+        prevNalStart = nalStart;
+        nalStart = p;
+        if (prevNalStart) {
+          unsigned nalSize = p - prevNalStart - nalStartSize;
+          UnalignedWrite32 (prevNalStart, nalSize);
+          LOG (DEBUG, "found nal size: " << nalSize << " at " << prevNalStart - buf);
+        }
+        // Skip NALU Start code;
+        p += nalStartSize;
+        // VCL units are the last NALUs in the encoded chunk
+        if ((p[0] & 0x1f) <= 5) {
+          break;
+        }
+      }
+      p += 1;
+    }
+    // Convert the last NALU
+    if (nalStart) {
+      unsigned nalSize = bufSize - (nalStart - buf) - nalStartSize;
+      UnalignedWrite32 (nalStart, nalSize);
+      LOG (DEBUG, "last nal size: " << nalSize << " at " << nalStart - buf);
+    }
+  }
+
+  static void SignalEOS (void *data)
+  {
+    DroidVideoEncoder *encoder = (DroidVideoEncoder *) data;
+    encoder->EOS ();
+  }
+
+  static void DroidError (void *data, int err)
+  {
+    DroidVideoEncoder *encoder = (DroidVideoEncoder *) data;
+    LOG (ERROR, "Droidmedia encoder error " << err);
+    if (g_platform_api)
+      g_platform_api->runonmainthread (WrapTask (encoder,
+            &DroidVideoEncoder::Error, GMPDecodeErr));
+  }
+
+  void EOS ()
+  {
+    LOG (INFO, "Encoder EOS");
+  }
+};
 
 /*
  * GMP Initialization functions
@@ -583,6 +1016,9 @@ GMPErr GMPGetAPI (const char *apiName, void *hostAPI, void **pluginApi)
   if (!strcmp (apiName, "decode-video")) {
     *pluginApi = new DroidVideoDecoder (static_cast <GMPVideoHost *>(hostAPI));
     return GMPNoErr;
+  } else if (!strcmp (apiName, "encode-video")) {
+    *pluginApi = new DroidVideoEncoder (static_cast <GMPVideoHost *>(hostAPI));
+    return GMPNoErr;
   }
   return GMPGenericErr;
 }
@@ -595,3 +1031,4 @@ void GMPShutdown (void)
 }
 
 }
+/* vim: set ts=2 et sw=2 tw=80: */
