@@ -9,9 +9,8 @@ Source1:        gmp-generate-info.sh
 BuildRequires:  meson
 BuildRequires:  ninja
 BuildRequires:  oneshot
-BuildRequires:  pkgconfig(libandroid-properties)
-BuildRequires:  droidmedia-devel
-Requires:       droidmedia
+BuildRequires:  pkgconfig(droidmedia)
+Suggests:       droidmedia
 Requires:  oneshot
 %{_oneshot_requires_post}
 

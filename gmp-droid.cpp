@@ -1007,8 +1007,10 @@ GMPErr GMPInit (GMPPlatformAPI * platformAPI)
 {
   LOG (DEBUG, "Initializing droidmedia!");
   g_platform_api = platformAPI;
-  droid_media_init ();
-  return GMPNoErr;
+  if (droid_media_init ())
+    return GMPNoErr;
+  else
+    return GMPNotImplementedErr;
 }
 
 GMPErr GMPGetAPI (const char *apiName, void *hostAPI, void **pluginApi)
