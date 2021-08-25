@@ -672,10 +672,32 @@ public:
     m_metadata.slice_height = codecSettings.mHeight;
     m_metadata.meta_data = false;
 
+    droid_media_colour_format_constants_init (&m_constants);
+    m_metadata.color_format = -1;
+
     {
-      DroidMediaColourFormatConstants c;
-      droid_media_colour_format_constants_init(&c);
-      m_metadata.color_format = c.OMX_COLOR_FormatYUV420Planar;
+      uint32_t supportedFormats[32];
+      unsigned int nFormats = droid_media_codec_get_supported_color_formats (
+          &m_metadata.parent, 1, supportedFormats, 32);
+
+      LOG (INFO, "Found " << nFormats << " color formats supported:");
+      for (unsigned int i = 0; i < nFormats; i++) {
+        int fmt = static_cast<int>(supportedFormats[i]);
+        LOG (INFO, "  " << std::hex << fmt << std::dec);
+        // The list of formats is sorted in order of codec's preference,
+        // so pick the first one supported.
+        if (m_metadata.color_format == -1 &&
+            (fmt == m_constants.OMX_COLOR_FormatYUV420Planar ||
+             fmt == m_constants.OMX_COLOR_FormatYUV420SemiPlanar)) {
+          m_metadata.color_format = fmt;
+        }
+      }
+    }
+
+    if (m_metadata.color_format == -1) {
+      LOG (ERROR, "No supported color format found");
+      Error (GMPNotImplementedErr);
+      return;
     }
 
     LOG (INFO,
@@ -683,7 +705,8 @@ public:
         << " width=" << m_metadata.parent.width
         << " height=" << m_metadata.parent.height
         << " fps=" << m_metadata.parent.fps
-        << " bitrate=" << m_metadata.bitrate);
+        << " bitrate=" << m_metadata.bitrate
+        << " color_format=" << m_metadata.color_format);
   }
 
   void Encode (GMPVideoi420Frame* inputFrame,
@@ -725,9 +748,18 @@ public:
 
     memcpy(buf, inputFrame->Buffer(kGMPYPlane), y_size);
     buf += y_size;
-    memcpy(buf, inputFrame->Buffer(kGMPUPlane), u_size);
-    buf += u_size;
-    memcpy(buf, inputFrame->Buffer(kGMPVPlane), v_size);
+    if (m_metadata.color_format == m_constants.OMX_COLOR_FormatYUV420Planar) {
+      memcpy(buf, inputFrame->Buffer(kGMPUPlane), u_size);
+      buf += u_size;
+      memcpy(buf, inputFrame->Buffer(kGMPVPlane), v_size);
+    } else {
+      uint8_t *inpU = inputFrame->Buffer(kGMPUPlane);
+      uint8_t *inpV = inputFrame->Buffer(kGMPVPlane);
+      for (unsigned i = 0; i < u_size + v_size; i += 2) {
+        buf[i] = *inpU++;
+        buf[i + 1] = *inpV++;
+      }
+    }
 
     data.ts = inputFrame->Timestamp();
     data.sync = frameTypes[0] == kGMPKeyFrame;
@@ -792,6 +824,7 @@ private:
   GMPMutex *m_stop_lock = nullptr;
   bool m_processing = false;
   bool m_stopping = false;
+  DroidMediaColourFormatConstants m_constants;
 
   bool CreateEncoder ()
   {
