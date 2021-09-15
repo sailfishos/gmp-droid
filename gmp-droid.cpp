@@ -454,6 +454,11 @@ public:
   // Return the decoded data back to the parent.
   void ProcessFrame_m (DroidMediaCodecData * data)
   {
+    if (m_resetting || !m_callback || !m_host) {
+        LOG(INFO, "Discarding decoded frame received while resetting");
+        return;
+    }
+
     if (!m_conv) {
       ConfigureOutput (data);
     }
