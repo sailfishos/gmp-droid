@@ -800,9 +800,11 @@ public:
     m_stop_lock->Release();
 
     LOG (INFO, "EncodingComplete");
-    droid_media_codec_stop(m_codec);
-    droid_media_codec_destroy(m_codec);
-    LOG (INFO, "EncodingComplete: Codec destroyed");
+    if (m_codec) {
+      droid_media_codec_stop(m_codec);
+      droid_media_codec_destroy(m_codec);
+      LOG (INFO, "EncodingComplete: Codec destroyed");
+    }
     m_stopping = false;
     m_codec = nullptr;
   }
