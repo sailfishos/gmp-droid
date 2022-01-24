@@ -313,6 +313,7 @@ public:
 
     {
       DroidMediaCodecCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.error = DroidVideoDecoder::DroidError;
       cb.size_changed = DroidVideoDecoder::SizeChanged;
       cb.signal_eos = DroidVideoDecoder::SignalEOS;
@@ -321,6 +322,7 @@ public:
 
     {
       DroidMediaCodecDataCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.data_available = DroidVideoDecoder::DataAvailable;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
@@ -858,6 +860,7 @@ private:
 
     {
       DroidMediaCodecCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.error = DroidVideoEncoder::DroidError;
       cb.signal_eos = DroidVideoEncoder::SignalEOS;
       droid_media_codec_set_callbacks (m_codec, &cb, this);
@@ -865,6 +868,7 @@ private:
 
     {
       DroidMediaCodecDataCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.data_available = DroidVideoEncoder::DataAvailableCallback;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
