@@ -313,6 +313,7 @@ public:
 
     {
       DroidMediaCodecCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.error = DroidVideoDecoder::DroidError;
       cb.size_changed = DroidVideoDecoder::SizeChanged;
       cb.signal_eos = DroidVideoDecoder::SignalEOS;
@@ -321,6 +322,7 @@ public:
 
     {
       DroidMediaCodecDataCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.data_available = DroidVideoDecoder::DataAvailable;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
@@ -683,7 +685,8 @@ public:
       m_metadata.parent.fps = codecSettings.mMaxFramerate;
     }
 
-    m_metadata.bitrate = codecSettings.mStartBitrate * 1024;
+    m_bitrate = codecSettings.mStartBitrate < 100 ? 100 : codecSettings.mStartBitrate;
+    m_metadata.bitrate = m_bitrate * 1000;
     m_metadata.stride = codecSettings.mWidth;
     m_metadata.slice_height = codecSettings.mHeight;
     m_metadata.meta_data = false;
@@ -796,6 +799,16 @@ public:
   void SetRates(uint32_t aNewBitRate, uint32_t aFrameRate)
   {
       LOG (INFO, "SetRates: newBitrate=" << aNewBitRate << " frameRate=" << aFrameRate);
+
+      if (aNewBitRate < 100) {
+        aNewBitRate = 100;
+        LOG (INFO, "newBitrate is too low, setting to " << aNewBitRate);
+      }
+
+      if (aNewBitRate != m_bitrate) {
+        m_bitrate = aNewBitRate;
+        droid_media_codec_set_video_encoder_bitrate(m_codec, m_bitrate * 1000);
+      }
   }
 
   void SetPeriodicKeyFrames(bool aEnable)
@@ -843,6 +856,7 @@ private:
   bool m_processing = false;
   bool m_stopping = false;
   DroidMediaColourFormatConstants m_constants;
+  uint32_t m_bitrate = 0;
 
   bool CreateEncoder ()
   {
@@ -858,6 +872,7 @@ private:
 
     {
       DroidMediaCodecCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.error = DroidVideoEncoder::DroidError;
       cb.signal_eos = DroidVideoEncoder::SignalEOS;
       droid_media_codec_set_callbacks (m_codec, &cb, this);
@@ -865,6 +880,7 @@ private:
 
     {
       DroidMediaCodecDataCallbacks cb;
+      memset(&cb, 0, sizeof(cb));
       cb.data_available = DroidVideoEncoder::DataAvailableCallback;
       droid_media_codec_set_data_callbacks (m_codec, &cb, this);
     }
