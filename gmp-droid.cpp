@@ -690,6 +690,7 @@ public:
     m_metadata.stride = codecSettings.mWidth;
     m_metadata.slice_height = codecSettings.mHeight;
     m_metadata.meta_data = false;
+    m_metadata.bitrate_mode = DROID_MEDIA_CODEC_BITRATE_CONTROL_CBR;
 
     droid_media_colour_format_constants_init (&m_constants);
     m_metadata.color_format = -1;
