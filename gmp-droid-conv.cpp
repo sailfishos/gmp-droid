@@ -207,8 +207,8 @@ DroidColourConvert::GetConverter (DroidMediaCodecMetaData * md,
   DroidColourConvert *converter;
   *conv_name = "None";
   DroidMediaConvert *droidConvert = droid_media_convert_create ();
-  if (droidConvert) {
-    //TODO: Check DONT_USE_DROID_CONVERT_VALUE quirk. May not be needed.
+
+  if (droidConvert && !std::getenv("GMP_DROID_DONT_USE_DROID_CONVERT")) {
     converter = new ConvertNative (droidConvert);
     *conv_name = "ConvertNative";
   } else {
